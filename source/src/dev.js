@@ -4,6 +4,7 @@
 //   F    fly the camera along the scripted path (FLY in main.js), one minute through the whole world
 //   B    the same flight as a benchmark: the resolution stays fixed, every frame is timed, the result is shown at the end
 //   F, B or 1-6 during a flight stop it
+//   K, T, G, V  game tests: spawn one alien of each kind, hold the trigger, take no harm, hide the game's models
 {
   const LOGN = 1 << 16, logFrame = new Float32Array(LOGN), logGpu = new Float32Array(LOGN);
   let flying = false, bench = false, last = 0, nFrame = 0, nGpu = 0;
@@ -25,15 +26,24 @@
     }
     draw();
   };
+  let god = false; setInterval(() => { if (god) { hp = suit = coreHP = 100; } }, 50);
+  // a shader or pipeline that failed validation is easy to miss: put the first error on screen
+  setInterval(() => { if (gpuErr) info.textContent = 'GPU error: ' + gpuErr.slice(0, 600); }, 1000);
   addEventListener('keydown', (e) => {
     if (menu || e.repeat) return;
-    if (e.code === 'KeyF' || e.code === 'KeyB') {
+    const code = codeOf(e);
+    if (code === 'KeyF' || code === 'KeyB') {
       if (flying) stop();
       else {
-        flying = true; bench = e.code === 'KeyB'; F[FLT] = 0; last = F[LAST]; nFrame = nGpu = 0;
+        flying = true; bench = code === 'KeyB'; F[FLT] = 0; last = F[LAST]; nFrame = nGpu = 0;
         // a benchmark hides the stats line and holds the resolution: dynT at -Infinity keeps frame() from tuning it
         if (bench) { hud = false; info.textContent = ''; dynT = -Infinity; }
       }
-    } else if (/Digit[1-6]/.test(e.code)) stop();
+    } else if (/Digit[1-6]/.test(code)) stop();
+    // K: one alien of each kind in front of the camera. T: hold / release the trigger. G: the diver and the core take no harm
+    else if (code === 'KeyK') { gameStart(); for (let k = 0; k < 4; k++) spawn(k, F[CX] + F[FX] * 7 + F[RX] * (k - 1.5) * 2.4, F[CY] + F[FY] * 7 + 0.5, F[CZ] + F[FZ] * 7 + F[RZ] * (k - 1.5) * 2.4); }
+    else if (code === 'KeyT') trig = 1 - trig;
+    else if (code === 'KeyG') god = !god;
+    else if (code === 'KeyV') gHide = !gHide;
   });
 }

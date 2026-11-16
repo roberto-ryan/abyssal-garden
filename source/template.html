@@ -2,7 +2,7 @@
 <html lang=en>
 <head>
 <meta charset=utf-8>
-<title>Abyssal Garden</title>
+<title>Abyssal Garden: Rift Defense</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=theme-color content=#03131c>
 <style>
@@ -15,8 +15,9 @@ body {
   font: 700 clamp(13px, .7vw + .9vh, 36px)/1.4 system-ui, sans-serif; color: #e8fbff;
   -webkit-user-select: none; user-select: none;
 }
-/* a phone held upright gets the whole page turned on its side, so the scene is always landscape */
-@media (orientation: portrait) and (pointer: coarse) {
+/* a phone held upright gets the whole page turned on its side, so the scene is always landscape
+   (not a square screen: that one counts as portrait as soon as it is a pixel taller than wide) */
+@media (max-aspect-ratio: 4/5) and (pointer: coarse) {
   body { width: 100dvh; height: 100dvw; transform-origin: 0 0; transform: rotate(90deg) translateY(-100%); }
 }
 
@@ -40,10 +41,12 @@ h1 {
   color: #0000; background: linear-gradient(#fff 25%, #7ff3ff 60%, #14a9c4);
   -webkit-background-clip: text; background-clip: text; filter: drop-shadow(0 .06em .2em #000c);
 }
+h1 small { display: block; margin-top: .5em; font-size: .28em; letter-spacing: .6em; text-indent: .6em; }
 p { margin: 0; }
 #a { display: grid; width: 27em; max-width: 100%; }
 #a > * { grid-area: 1/1; transition: opacity .8s, visibility .8s; }
-#s, #w, #q, #k, #h { font-size: .8em; letter-spacing: .12em; text-transform: uppercase; }
+#s, #w, #q, #k, #h, #br { font-size: .8em; letter-spacing: .12em; text-transform: uppercase; }
+#br { color: #ffb400; text-wrap: balance; }
 #w { margin-top: 1.2em; color: #7ff3ff; text-wrap: balance; }
 
 /* loading bar */
@@ -80,7 +83,7 @@ a + a { background: #ff5e5b; color: #fff; }
 svg { width: 1.5em; height: 1.5em; fill: currentColor; }
 
 /* dark plates under the dive button: detail level, list of controls, touch hint */
-#q, #k, #h { padding: 1em 1.6em; border-radius: .7em; background: #03131cb3; }
+#q, #k, #h, #br { padding: 1em 1.6em; border-radius: .7em; background: #03131cb3; }
 
 /* detail level: three buttons in a row, the current one lit */
 #q { display: flex; align-items: center; gap: .4em; padding: .4em; }
@@ -114,34 +117,77 @@ svg { width: 1.5em; height: 1.5em; fill: currentColor; }
 .g #o { display: flex; }
 .p #o { display: none; }
 #i {
-  position: absolute; top: 1em; left: 1.2em; margin: 0; font: .8em/1.6 ui-monospace, Consolas, monospace;
+  position: absolute; top: 4.6em; left: 1.2em; margin: 0; font: .8em/1.6 ui-monospace, Consolas, monospace;
   white-space: pre-wrap; text-shadow: 0 1px 4px #000; pointer-events: none;
+}
+
+/* the game's head-up display: amber, only in the scene. Health and suit bottom left, ammunition bottom right,
+   wave and core at the top, messages above the centre */
+#u {
+  position: absolute; inset: 0; display: none; pointer-events: none; color: #ffb400;
+  text-shadow: 0 0 .5em #f808, 0 1px 3px #000; font-variant-numeric: tabular-nums; letter-spacing: .08em;
+}
+.g #u { display: block; }
+#u p { position: absolute; }
+#u b { font-size: 2.6em; line-height: 1; }
+#x {
+  position: absolute; left: 50%; top: 50%; width: 1.5em; height: 1.5em; margin: -.75em; border-radius: 50%;
+  background: radial-gradient(#ffb400 0 1.5px, #0000 2.5px); box-shadow: inset 0 0 0 1.5px #ffb40059;
+  transition: transform .08s;
+}
+#x.h { box-shadow: inset 0 0 0 2px #fff; transform: scale(.7); }
+#v, #am { bottom: 1em; display: flex; align-items: baseline; gap: .5em; }
+#v { left: 1.4em; }
+#v b { min-width: 1.9em; }
+#v.w { color: #ff3b1f; }
+#am { right: 1.4em; justify-content: flex-end; }
+#rs { font-size: 1.4em; opacity: .8; }
+#wn { position: absolute; right: 0; bottom: 3.6em; font-size: .8em; font-style: normal; white-space: nowrap; opacity: .8; }
+#tp { top: 1em; left: 0; right: 0; text-align: center; font-size: .9em; }
+#cr {
+  position: absolute; top: 2.9em; left: 50%; width: 16em; height: .45em; margin-left: -8em; border-radius: 1em;
+  overflow: hidden; background: #03131c99; box-shadow: 0 0 0 1.5px #ffb40080;
+}
+#cf { display: block; height: 100%; background: #35e6ff; transform-origin: 0; }
+#ms {
+  top: 24%; left: 0; right: 0; text-align: center; font-size: 1.7em; letter-spacing: .2em; white-space: pre-line;
+  transition: opacity .4s;
+}
+/* touch: change weapon and reload */
+#tb { position: absolute; right: .6em; top: 38%; display: none; gap: .6em; }
+#tb button { padding: .5em .7em; background: #03222dd9; box-shadow: inset 0 0 0 2px #ffb400; color: #ffb400; opacity: .8; }
+@media (pointer: coarse) {
+  .g #tb { display: grid; }
 }
 </style>
 </head>
 <body class=l>
 <canvas id=c></canvas>
 <div id=m>
-  <h1>Abyssal Garden</h1>
+  <h1>Abyssal Garden<small>Rift Defense</small></h1>
   <div id=a>
     <div id=l><div id=p><i id=b></i></div><p id=s>Diving…</p><p id=w hidden>Use Google Chrome for optimal experience</p></div>
     <div id=g>
       <button id=d>Dive in</button>
       <p id=q><span>Detail</span><button>Low</button><button>Medium</button><button>High</button></p>
+      <p id=br>Aliens are pouring through rifts in the reef. Keep the resonance core alive.</p>
       <div id=k>
         <p>
           <i><b>W</b><b>A</b><b>S</b><b>D</b></i>Swim
-          <i><b>Q</b><b>E</b></i>Down / up
-          <i><b>Shift</b></i>Faster
-          <i><b>1</b>–<b>6</b></i>Viewpoints
+          <i><b>Space</b><b>C</b></i>Up / down
+          <i><b>Shift</b></i>Thruster
+          <i><b>Mouse L</b></i>Fire
+          <i><b>Mouse R</b></i>Aim
         </p>
         <p>
+          <i><b>R</b></i>Reload
+          <i><b>1</b>–<b>3</b></i>Weapon
           <i><b>Esc</b></i>Menu
           <i><b>M</b></i>Mute
           <i><b>H</b></i>Stats
         </p>
       </div>
-      <p id=h>Hold to swim forward · slide to steer · second finger to go faster</p>
+      <p id=h>Left thumb swims · right thumb aims · the weapon fires when an alien is in your sights</p>
     </div>
   </div>
   <p id=f>
@@ -149,6 +195,15 @@ svg { width: 1.5em; height: 1.5em; fill: currentColor; }
     <a href=https://ko-fi.com/noniv target=_blank><svg viewBox="0 0 24 24"><path fill-rule=evenodd d="M2 5h16.5a4.5 4.5 0 0 1 0 9H17a6 6 0 0 1-6 5H8a6 6 0 0 1-6-6zM17 8v3h1.5a1.5 1.5 0 0 0 0-3zM9.5 15.5 5.9 12a2.2 2.2 0 0 1 3.6-2.5 2.2 2.2 0 0 1 3.6 2.5z"/></svg>Support</a>
   </p>
 </div>
+<div id=u>
+  <i id=x></i>
+  <p id=tp></p>
+  <div id=cr><i id=cf></i></div>
+  <p id=ms></p>
+  <p id=v>✚<b id=hp>100</b>⚡<b id=ar>0</b></p>
+  <p id=am><b id=mg>0</b><span id=rs>0</span><i id=wn></i></p>
+</div>
+<div id=tb><button id=sw aria-label="Change weapon">⇄</button><button id=rl aria-label=Reload>⟳</button></div>
 <button id=o aria-label=Menu>≡</button>
 <pre id=i></pre>
 <script>

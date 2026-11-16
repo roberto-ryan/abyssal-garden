@@ -3,7 +3,8 @@
 // ============================================================================
 // A fixed Web Audio graph, built on the first click / key / touch and driven by a 10 Hz timer, not the frame loop.
 // Layers: rumble, surface wash, water rush (follows camera speed), drone, bubbles, chimes and distant whale calls.
-let AC, OUT, muted = false;
+// The game's sound effects (SFX) play on pooled voices of the same graph: nothing is created when a shot is fired.
+let AC, OUT, SFX, muted = false;
 const VOL = 0.78; // master level: about -18.5 LUFS, peaks near -5.5 dBFS
 function mkSound(ac) {
   const sr = ac.sampleRate;
@@ -36,8 +37,36 @@ function mkSound(ac) {
   const play = (vs, t, f0, f1, dur, vol, att) => {
     const v = vs.shift(), f = v.o.frequency, g = v.g.gain; vs.push(v);
     v.p.pan.setValueAtTime(rr(-0.7, 0.7), t);
-    f.setValueAtTime(f0, t); f.exponentialRampToValueAtTime(f1, t + dur);
-    g.setValueAtTime(0, t); g.linearRampToValueAtTime(vol, t + att); g.setTargetAtTime(0, t + att, (dur - att) / 5);
+    f.cancelScheduledValues(t); f.setValueAtTime(f0, t); f.exponentialRampToValueAtTime(f1, t + dur);
+    g.cancelScheduledValues(t); g.setValueAtTime(0, t); g.linearRampToValueAtTime(vol, t + att); g.setTargetAtTime(0, t + att, (dur - att) / 5);
+  };
+  // --- game effects: muffled noise bursts (the looped noise through a closing low-pass) and gliding tones
+  const nz = [0.8, 1.17, 1.54, 1.91].map((rate) => { const g = G(0, out, G(0.35, wet)), f = BQ('lowpass', 800, 0.8, g); src(rate, f); return { g, f }; });
+  const burst = (t, f0, f1, dur, vol) => {
+    const v = nz.shift(), f = v.f.frequency, g = v.g.gain; nz.push(v);
+    f.cancelScheduledValues(t); f.setValueAtTime(f0, t); f.exponentialRampToValueAtTime(f1, t + dur);
+    g.cancelScheduledValues(t); g.setValueAtTime(vol, t); g.setTargetAtTime(0, t + 0.01, dur / 4);
+  };
+  const saw = pool(6, 0.3, 'sawtooth'), tone = pool(6, 0.25);
+  const at = () => ac.currentTime + 0.01;
+  SFX = {
+    rifle: () => { const t = at(); burst(t, 1500, 240, 0.09, 1.1); play(tone, t, 170, 55, 0.09, 0.3, 0.003); },
+    harpoon: () => { const t = at(); burst(t, 700, 110, 0.3, 1.2); play(tone, t, 260, 70, 0.35, 0.3, 0.005); },
+    lance: () => { const t = at(); burst(t, 2400, 300, 0.4, 1); play(saw, t, 1100, 80, 0.55, 0.1, 0.01); play(tone, t, 1900, 280, 0.4, 0.14, 0.005); },
+    empty: () => play(tone, at(), 1500, 1100, 0.04, 0.07, 0.002),
+    reload: () => { const t = at(); burst(t, 1100, 500, 0.06, 0.5); burst(t + 0.45, 1400, 400, 0.08, 0.6); },
+    hit: () => burst(at(), 600, 140, 0.07, 0.5),
+    die: (k) => play(saw, at(), rr(520, 760) / (1 + k * 0.6), 90, 0.6, 0.06, 0.02),
+    leap: () => play(saw, at(), 380, 900, 0.16, 0.035, 0.02),
+    spit: () => { const t = at(); play(saw, t, 240, 620, 0.2, 0.05, 0.03); burst(t, 500, 1200, 0.15, 0.3); },
+    roar: () => play(saw, at(), 70, 150, 1.1, 0.12, 0.3),
+    charge: () => play(tone, at(), 220, 1300, 0.9, 0.07, 0.7),
+    hurt: () => { const t = at(); burst(t, 320, 90, 0.25, 1.2); play(tone, t, 115, 50, 0.35, 0.4, 0.005); },
+    rift: () => { const t = at(); burst(t, 180, 2600, 0.9, 0.5); play(tone, t, 55, 440, 1, 0.16, 0.6); },
+    pickup: () => { const t = at(); play(tone, t, 660, 660, 0.12, 0.1, 0.005); play(tone, t + 0.09, 990, 990, 0.25, 0.1, 0.005); },
+    alarm: () => { const t = at(); play(saw, t, 196, 196, 0.5, 0.05, 0.05); play(saw, t + 0.6, 196, 196, 0.5, 0.05, 0.05); play(saw, t + 1.2, 262, 262, 0.9, 0.05, 0.05); },
+    core: () => play(tone, at(), 95, 45, 0.5, 0.35, 0.01),
+    over: () => { const t = at(); play(saw, t, 220, 40, 2.5, 0.12, 0.05); burst(t, 900, 60, 2, 1.2); },
   };
   const NOTES = [0, 2, 5, 7, 9, 12, 14, 17, 19]; // D major pentatonic, in semitones above A4
   let lt = ac.currentTime, tB = lt + 1.5, tC = lt + 5, tW = lt + 12, lx = F[CX], ly = F[CY], lz = F[CZ];
