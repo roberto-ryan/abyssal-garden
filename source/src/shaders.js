@@ -190,7 +190,8 @@ const WK = array<vec3f, 10>(vec3f(1., 2., 1.), vec3f(-2., 1., .9), vec3f(3., 1.,
 
 // ---------------------------------------------------------------- shared scene code
 const S_G = /*wgsl*/`
-struct G { vp: mat4x4f, sm: mat4x4f, cam: vec4f, right: vec4f, up: vec4f, fwd: vec4f, sun: vec4f, res: vec4f, mis: vec4f };
+// fx (the game's screen feedback): x damage, y pickup flash, z death, w unused
+struct G { vp: mat4x4f, sm: mat4x4f, cam: vec4f, right: vec4f, up: vec4f, fwd: vec4f, sun: vec4f, res: vec4f, mis: vec4f, fx: vec4f };
 const SIG = vec3f(.058, .0235, .0195);
 const KD = vec3f(.056, .0245, .0170);
 const WCOL = vec3f(.16, .58, .90);
@@ -775,8 +776,217 @@ fn sat3(x: vec3f) -> vec3f { return clamp(x, vec3f(0.), vec3f(1.)); }
   c *= l / max(l0, 1e-4);
   c = mix(c, vec3f(l), ss(.55, 1., l) * .1);
   c = mix(vec3f(l), c, .93) + vec3f(.008, .002, 0.);
+  // the game: red closes in from the edges when hurt, a cyan blink on a pickup, the colour drains away on death
+  let vg = dot(q, q);
+  c = mix(c, vec3f(.5, .01, .0), sat(g.fx.x * (.12 + vg * 2.4)));
+  c += vec3f(.1, .5, .6) * g.fx.y * (.06 + vg);
+  c = mix(c, vec3f(l * .8, l * .12, l * .1), g.fx.z);
   c = pow(max(c, vec3f(0.)), vec3f(1. / 2.2));
   let n = ign(fc.xy) + ign(fc.xy + 37.) - 1.;
   return vec4f(c + n / 255., 1.);
+}
+`;
+
+// ---------------------------------------------------------------- the game: lighting shared by sculpted and scanned models
+// wet skin and worn metal under water: sunlight wraps round the form and bleeds through at the terminator (sss), two
+// highlights, the water reflected at grazing angles (tinted on metal), a faint glowing rim. ca: caustics at wp.
+const S_LIT = /*wgsl*/`
+fn lit(wp: vec3f, N: vec3f, alb: vec3f, f0: f32, tint: vec3f, gloss: f32, occ: f32, sss: vec3f, rim: vec3f, lt: f32, ca: vec3f, z: f32) -> vec3f {
+  let L = g.sun.xyz; let V = normalize(g.cam.xyz - wp); let vv = vol(wp);
+  let E = sunE(wp.y, z) * lt; let ndl = dot(N, L); let wrap = sat((ndl + .3) / 1.3);
+  let R = reflect(-V, N); let fr = f0 + (1. - f0) * pow(1. - sat(dot(N, V)), 5.);
+  var c = alb * (1. - f0) * (E * wrap * wrap * (.3 + ca) + (amb(wp, N, vv.g, z) * 1.6 + side(wp, N, 1., z) * .9) * occ);
+  c += alb * E * sss * sat(1. - abs(ndl) * 2.5) * .3;
+  let ndh = sat(dot(N, normalize(V + L)));
+  c += E * (.3 + ca) * (pow(ndh, mix(20., 160., gloss)) * gloss * 2.5 + pow(ndh, 12.) * .12) * tint * sat(ndl * 4.);
+  c += (amb(wp, R, vv.g, z) + side(wp, R, 1., z) + E * ca * sat(R.y) * .25) * fr * gloss * occ * tint;
+  return c + rim * pow(1. - sat(dot(N, V)), 3.) * .2 * occ;
+}
+`;
+
+// ---------------------------------------------------------------- the game: aliens, the weapon in hand, the core
+// instance: a = position + scale, b = rotation, c = (kind, animation phase, flash / glow, dissolve)
+// kind 0 leaper, 1 spitter, 2 stalker, 3 caster, 4 weapon, 5 resonance core
+// vertex (models.js): normal + how much it moves with the animation, then m = (occlusion, teeth and claws or on
+// hard models edge wear, glow, soft underside or on hard models 1 glove / .5 plastic)
+const W_GAME = S_B + S_LIT + /*wgsl*/`
+struct VI { @location(0) p: vec3f, @location(1) n: vec4f, @location(2) a: vec4f, @location(3) b: vec4f, @location(4) c: vec4f, @location(5) m: vec4f };
+struct VO { @builtin(position) cp: vec4f, @location(0) wp: vec3f, @location(1) on: vec3f, @location(2) op: vec3f,
+  @location(3) @interpolate(flat) m: vec4f, @location(4) v: vec4f, @location(5) lt: f32, @location(6) @interpolate(flat) q: vec4f };
+@vertex fn vs(i: VI) -> VO {
+  var o: VO;
+  var l = i.p; let k = i32(i.c.x + .5); let w = max(i.n.w, 0.); let ph = i.c.y;
+  if (k == 0) { l.y += sin(ph * 2. - w * 3.) * w * .09; l.x *= 1. + sin(ph * 2.) * w * .22; }
+  else if (k == 1) { l.x += sin(ph - l.z * 5.) * w * .1; l.y += cos(ph * 1.3 - l.z * 4.) * w * .08; }
+  else if (k == 2) { l.x += sin(ph - w * 4.5) * w * w * .55; }
+  else if (k == 3) { l.x += sin(ph - w * 3.) * w * .12; l.z += cos(ph * .7 - w * 2.) * w * .1; }
+  let p = i.a.xyz + qrot(i.b, l * i.a.w);
+  o.cp = g.vp * vec4f(p, 1.); o.wp = p; o.on = i.n.xyz; o.op = i.p; o.m = i.c; o.v = i.m; o.q = i.b;
+  o.lt = shadow1(p);
+  return o;
+}
+// the detail texture projected along the three axes
+fn tp(p: vec3f, n: vec3f, s: f32) -> vec4f {
+  var w = pow(abs(n), vec3f(4.)); w /= (w.x + w.y + w.z);
+  return textureSample(tD, sR, p.zy * s) * w.x + textureSample(tD, sR, p.xz * s) * w.y + textureSample(tD, sR, p.xy * s) * w.z;
+}
+// dz: the dissolve noise of a dying alien (1 for everything else)
+fn shade(i: VO, dz: f32) -> vec4f {
+  let k = clamp(i32(i.m.x + .5), 0, 5);
+  let on = normalize(i.on);
+  var S = array<f32, 6>(5., 2.5, 1.3, 2.5, 13., .9); let s = S[k];
+  let A = tp(i.op, on, s); let B = tp(i.op, on, s * 4.3);
+  let dist = length(i.wp - g.cam.xyz);
+  let ca = caus(i.wp, dist);
+  let ao = i.v.x; let m1 = i.v.y; let glow = ss(.35, .8, i.v.z); let m3 = i.v.w;
+  var alb = vec3f(.3); var emi = vec3f(0.); var gloss = .5; var f0 = .04; var bump = .6;
+  var rim = vec3f(.08, .35, .16); var sss = vec3f(.5, .12, .08); var eyeC = vec3f(1.6, .5, .08);
+  let top = ss(-.3, .4, on.y);
+  if (k == 0) {
+    alb = mix(vec3f(.36, .25, .16), vec3f(.60, .47, .33), A.a);
+    alb = mix(alb, vec3f(.30, .10, .08), ss(.45, .7, B.a) * .5);
+    alb = mix(alb, vec3f(.50, .16, .13), m3 * .8);
+    eyeC = vec3f(1.6, .35, .05);
+  } else if (k == 1) {
+    alb = mix(vec3f(.22, .20, .08), vec3f(.46, .40, .18), A.a);
+    alb = mix(alb, vec3f(.20, .03, .02), ss(.15, .7, sin(i.op.z * 16. + A.b * 6.)) * .75 * top);
+    alb = mix(alb, vec3f(.55, .50, .38), m3 * .85);
+    eyeC = vec3f(1.8, 1.2, .1); sss = vec3f(.5, .3, .05);
+  } else if (k == 2) {
+    alb = vec3f(.07, .13, .12) + vec3f(.08, .15, .12) * ss(.4, .7, A.a);
+    alb = mix(alb, vec3f(.02, .045, .05), ss(.2, .8, sin(i.op.z * 5. + A.b * 4. + i.op.y * 3.)) * .6);
+    alb = mix(alb, vec3f(.50, .52, .44), ss(.25, .75, m3));
+    gloss = .8; bump = .35; eyeC = vec3f(1.3, 1.7, .2); sss = vec3f(.1, .3, .25);
+  } else if (k == 3) {
+    alb = mix(vec3f(.24, .19, .28), vec3f(.50, .40, .44), A.a);
+    alb = mix(alb, vec3f(.62, .36, .40), m3 * .8);
+    emi = vec3f(1., .35, .06) * ss(.55, .7, B.a) * m3 * (.15 + 2.5 * i.m.z);
+    rim = vec3f(.4, .15, .08); eyeC = vec3f(1.8, .65, .1) * (1. + 3. * i.m.z);
+  } else {
+    // weapons and the core: gunmetal worn bright on the edges, black plastic, neoprene gloves
+    let glove = ss(.7, .9, m3); let poly = ss(.2, .45, m3) * (1. - glove);
+    let wear = ss(.25, .8, m1 + (B.a - .5) * .5) * (1. - glove) * (1. - poly * .7);
+    alb = mix(vec3f(.11, .115, .13), vec3f(.55, .55, .56), wear) * (.75 + .5 * B.b);
+    alb = mix(alb, vec3f(.03, .032, .035), poly);
+    alb = mix(alb, vec3f(.035, .045, .06) * (.5 + B.b), glove);
+    gloss = mix(mix(mix(.75, .95, wear), .3, poly), .18, glove);
+    f0 = mix(.55, .04, max(poly, glove)); bump = mix(.12, .5, glove); rim = vec3f(0.); sss = vec3f(0.);
+    eyeC = select(mix(vec3f(.2, 1., 1.3), vec3f(1.6, .15, .05), i.m.z) * (1.3 + .5 * sin(g.cam.w * 3.) + 2. * i.m.y), vec3f(.25, .9, 1.1) * (.6 + 4. * i.m.z), k == 4);
+  }
+  if (k < 4) { alb = mix(alb, vec3f(.80, .74, .56), m1) * (.5 + .7 * B.b); gloss = mix(gloss, .7, m1); }
+  alb *= mix(.4, 1., ao) * (1. - glow); emi += eyeC * glow;
+  let N = normalize(qrot(i.q, on + (vec3f(B.r, B.g, A.r) - .5) * bump));
+  let z = zone(i.wp);
+  var c = lit(i.wp, N, alb, f0, mix(vec3f(1.), alb * 4.5, step(.3, f0)), gloss, mix(.3, 1., ao), sss, rim, i.lt, ca, z) + emi;
+  if (k < 3) { c += vec3f(.7, 1., .35) * i.m.z * .8; }
+  // the edge of the dissolve glows
+  if (i.m.w > 0.) { c += vec3f(.4, 1.4, .3) * ss(i.m.w + .12, i.m.w, dz); }
+  return fin(fog(c, i.wp, z));
+}
+@fragment fn fs(i: VO) -> @location(0) vec4f { return shade(i, 1.); }
+// dying aliens dissolve; they get their own pipeline so that everything else keeps early depth rejection
+@fragment fn fsD(i: VO) -> @location(0) vec4f {
+  let dz = textureSample(tD, sR, i.op.xz * 3.).a * .6 + textureSample(tD, sR, i.op.zy * 9.).b * .4;
+  if (dz < i.m.w) { discard; }
+  return shade(i, dz);
+}
+`;
+
+// ---------------------------------------------------------------- the game: scanned and modelled assets (../assets)
+// Same instances as W_GAME; the vertex carries a texture coordinate, group 1 the colour, normal and occlusion maps
+// (for the weapon: occlusion, roughness, metal). The specimens are museum pieces, dry and pale: here they are
+// darker, wet and tinted, and light seeps out of their creases.
+const W_TEX = S_B + S_LIT + /*wgsl*/`
+@group(1) @binding(0) var tC: texture_2d<f32>;
+@group(1) @binding(1) var tN: texture_2d<f32>;
+@group(1) @binding(2) var tO: texture_2d<f32>;
+struct VI { @location(0) p: vec3f, @location(1) n: vec4f, @location(2) a: vec4f, @location(3) b: vec4f, @location(4) c: vec4f, @location(5) uv: vec2f };
+struct VO { @builtin(position) cp: vec4f, @location(0) wp: vec3f, @location(1) n: vec3f, @location(2) op: vec3f,
+  @location(3) @interpolate(flat) m: vec4f, @location(4) uv: vec2f, @location(5) lt: f32 };
+@vertex fn vs(i: VI) -> VO {
+  var o: VO;
+  var l = i.p; let k = i32(i.c.x + .5); let w = max(i.n.w, 0.); let ph = i.c.y;
+  if (k == 0) { l.y += sin(ph * 1.5 - w * 2.) * w * .12; }
+  else if (k == 1) { l.x += sin(ph - l.z * 3.) * w * .16; }
+  else if (k == 2) { l.y += sin(ph * 1.6 + l.x * 2.5 + l.z * 2.) * w * .22; }
+  else if (k == 3) { let s = sin(ph * .8 - w * 3.) * w * .25; l.x *= 1. + s; l.z *= 1. + s; l.y -= s * .3; }
+  let p = i.a.xyz + qrot(i.b, l * i.a.w);
+  o.cp = g.vp * vec4f(p, 1.); o.wp = p; o.n = qrot(i.b, i.n.xyz); o.op = i.p; o.m = i.c; o.uv = i.uv;
+  o.lt = shadow1(p);
+  return o;
+}
+fn shade(i: VO, dz: f32) -> vec4f {
+  let k = clamp(i32(i.m.x + .5), 0, 4);
+  var col = textureSample(tC, sR, i.uv).rgb; let nm = textureSample(tN, sR, i.uv).xyz * 2. - 1.; let orm = textureSample(tO, sR, i.uv).rgb;
+  let ca = caus(i.wp, length(i.wp - g.cam.xyz));
+  // tangent frame from the screen-space derivatives of position and texture coordinate
+  let N0 = normalize(i.n);
+  let p1 = dpdx(i.wp); let p2 = dpdy(i.wp); let u1 = dpdx(i.uv); let u2 = dpdy(i.uv);
+  let q2 = cross(p2, N0); let q1 = cross(N0, p1);
+  let T = q2 * u1.x + q1 * u2.x; let Bt = q2 * u1.y + q1 * u2.y;
+  let sc = sign(dot(p1, q2)) * inverseSqrt(max(max(dot(T, T), dot(Bt, Bt)), 1e-20));
+  let N = normalize(T * (sc * nm.x) - Bt * (sc * nm.y) + N0 * nm.z);
+  var gloss = .7; var f0 = .04; var tint = vec3f(1.); var sss = vec3f(.5, .15, .08); var rim = vec3f(.08, .35, .16); var emi = vec3f(0.);
+  if (k == 4) {
+    gloss = 1. - orm.g; f0 = mix(.04, .6, orm.b); tint = mix(vec3f(1.), col * 3., orm.b); sss = vec3f(0.); rim = vec3f(0.);
+  } else {
+    var TINT = array<vec3f, 4>(vec3f(.85, .55, .45), vec3f(.6, .8, .35), vec3f(.45, .6, .75), vec3f(.8, .4, .6));
+    var GLOW = array<vec3f, 4>(vec3f(1.3, .3, .05), vec3f(.5, 1.3, .1), vec3f(.1, 1.1, .7), vec3f(1.5, .5, .1));
+    col = pow(col, vec3f(1.3)) * TINT[k] * 1.4;
+    let cr = 1. - orm.r;
+    emi = GLOW[k] * cr * cr * (.5 + .3 * sin(g.cam.w * 2.5 + i.m.y * .3) + 4. * i.m.z);
+  }
+  let z = zone(i.wp);
+  var c = lit(i.wp, N, col, f0, tint, gloss, mix(.25, 1., orm.r), sss, rim, i.lt, ca, z) + emi;
+  if (k < 3) { c += vec3f(.7, 1., .35) * i.m.z * .8; }
+  if (i.m.w > 0.) { c += vec3f(.4, 1.4, .3) * ss(i.m.w + .12, i.m.w, dz); }
+  return fin(fog(c, i.wp, z));
+}
+@fragment fn fs(i: VO) -> @location(0) vec4f { return shade(i, 1.); }
+@fragment fn fsD(i: VO) -> @location(0) vec4f {
+  let dz = textureSample(tD, sR, i.op.xz * 3.).a * .6 + textureSample(tD, sR, i.op.zy * 9.).b * .4;
+  if (dz < i.m.w) { discard; }
+  return shade(i, dz);
+}
+`;
+
+// ---------------------------------------------------------------- the game: glowing sprites and beams (additive)
+// instance: a = position + size, b = end point + width (beams) or (seed, 0, 0, 0), c = colour + kind
+// sprite kinds: 0 soft glow, 1 rift, 2 bubble, 3 orb; beam kinds: 0 tracer, 1 solid beam
+const W_FX = S_B + /*wgsl*/`
+struct VO { @builtin(position) cp: vec4f, @location(0) uv: vec2f, @location(1) @interpolate(flat) c: vec4f, @location(2) @interpolate(flat) f: vec2f };
+fn quad(i: u32) -> vec2f { return vec2f(f32(i & 1u), f32(i >> 1u)) * 2. - 1.; }
+@vertex fn vsP(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec4f, @location(2) c: vec4f) -> VO {
+  var o: VO; let q = quad(vi);
+  let p = a.xyz + (g.right.xyz * q.x + g.up.xyz * q.y) * a.w;
+  o.cp = g.vp * vec4f(p, 1.); o.uv = q; o.c = c;
+  o.f = vec2f(exp(-.028 * distance(a.xyz, g.cam.xyz)), b.x);
+  return o;
+}
+@fragment fn fsP(i: VO) -> @location(0) vec4f {
+  let r = length(i.uv); let k = i32(i.c.w + .5); var m = 0.;
+  if (k == 0) { m = ss(1., 0., r); m = m * m; }
+  else if (k == 1) {
+    let sw = .5 + .5 * sin(atan2(i.uv.y, i.uv.x + 1e-4) * 5. + r * 9. - g.cam.w * 7. + i.f.y * 20.);
+    m = (ss(1., .1, r) * (.2 + sw * sw) + ss(.4, 0., r) * 2.5) * ss(1., .8, r);
+  } else if (k == 2) {
+    m = ss(.55, .9, r) * ss(1., .92, r) * .8 + ss(.3, 0., length(i.uv - vec2f(-.35, .4))) * .7;
+  } else {
+    m = ss(1., 0., r); m = m * m * m * 2. + ss(.34, .2, r) * 2.5;
+  }
+  return vec4f(i.c.rgb * (m * i.f.x), 0.);
+}
+@vertex fn vsB(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec4f, @location(2) c: vec4f) -> VO {
+  var o: VO; let q = quad(vi);
+  let p = mix(a.xyz, b.xyz, q.y * .5 + .5);
+  let s = normalize(cross(b.xyz - a.xyz, p - g.cam.xyz) + vec3f(1e-6, 0., 0.));
+  o.cp = g.vp * vec4f(p + s * (q.x * b.w), 1.); o.uv = q; o.c = c;
+  o.f = vec2f(exp(-.028 * distance(p, g.cam.xyz)), 0.);
+  return o;
+}
+@fragment fn fsB(i: VO) -> @location(0) vec4f {
+  let x = abs(i.uv.x); var m = ss(1., 0., x); m = m * m + ss(.3, 0., x) * 1.5;
+  if (i.c.w < .5) { m *= ss(-1., .7, i.uv.y); }
+  return vec4f(i.c.rgb * (m * i.f.x), 0.);
 }
 `;

@@ -4,7 +4,7 @@
 const $ = (id) => document.getElementById(id);
 const canvas = $('c'), info = $('i'), body = document.body;
 // a phone held upright gets the page turned on its side (see template.html)
-const rot = matchMedia('(orientation:portrait) and (pointer:coarse)');
+const rot = matchMedia('(max-aspect-ratio:4/5) and (pointer:coarse)');
 // loading bar: each stage glides it to `to` (the share done) over ~`ms` on the compositor, so it moves while this
 // thread is busy
 let loaded = 0, dead; // dead: the graphics device was lost
@@ -22,13 +22,23 @@ if (!adapter) fail('No WebGPU adapter found.');
 $('w').hidden = !!navigator.userAgentData; // only Chromium-based browsers have it
 const hasTS = adapter.features.has('timestamp-query');
 const device = await adapter.requestDevice({ requiredFeatures: hasTS ? ['timestamp-query'] : [] });
-device.addEventListener('uncapturederror', (e) => console.error('GPU: ' + e.error.message));
+let gpuErr = ''; // the first validation error, for the development build to show
+device.addEventListener('uncapturederror', (e) => { console.error('GPU: ' + e.error.message); gpuErr ||= e.error.message; });
 // out of memory or a GPU timeout: reload a level lower, or on Low say what happened
 device.lost.then((l) => {
   if (l.reason === 'destroyed') return; // the page is closing
   if (LV < 2) { keep('abyssal', LV + 1); location.reload(); }
   dead = body.className = 'l e'; $('s').textContent = 'The graphics device was lost. Reload the page to try again.';
 });
+// Scanned and modelled assets (../assets, made by source/assets.mjs): 0 leaper, 1 spitter, 2 stalker, 3 caster, 4-5 the
+// rifle's two parts. Fetched while the world is built. Where they can't be had (the page opened straight from disk,
+// or just index.html downloaded) the game uses the sculpted models of models.js instead. Textures are halved per
+// detail level.
+const fetched = Promise.all(['leaper', 'spitter', 'stalker', 'caster', 'rifle', 'rifle2'].map(async (n) => {
+  const get = async (f) => { const r = await fetch('assets/' + f); if (!r.ok) throw 0; return r; };
+  const img = (s) => get(n + s + '.jpg').then((r) => r.blob()).then((b) => createImageBitmap(b, { colorSpaceConversion: 'none', resizeWidth: 1024 >> LV, resizeHeight: 1024 >> LV, resizeQuality: 'high' }));
+  return Promise.all([get(n + '.bin').then((r) => r.arrayBuffer()), img('_c'), img('_n'), img('_o')]);
+})).catch(() => null);
 const ctx = canvas.getContext('webgpu'), FMT = navigator.gpu.getPreferredCanvasFormat();
 const Q = device.queue, HDR = 'rgba16float', DEPTH = 'depth32float';
 const TU = GPUTextureUsage, BU = GPUBufferUsage, SS = GPUShaderStage;
@@ -48,8 +58,8 @@ const tDetail = tex(1024, 1024, 'rgba8unorm', TU.RENDER_ATTACHMENT | TU.TEXTURE_
 const tVol = tex(NX / 2, NY / 2, 'rg8unorm', TU.TEXTURE_BINDING | TU.COPY_DST, { d: NZ / 2 });
 const tMap = tex(512, 512, 'rgba8unorm', TU.TEXTURE_BINDING | TU.COPY_DST);
 
-const UB = new Float32Array(60), UBS = new Float32Array(60);
-const ubo = device.createBuffer({ size: 240, usage: BU.UNIFORM | BU.COPY_DST }), uboS = device.createBuffer({ size: 240, usage: BU.UNIFORM | BU.COPY_DST });
+const UB = new Float32Array(64), UBS = new Float32Array(64);
+const ubo = device.createBuffer({ size: 256, usage: BU.UNIFORM | BU.COPY_DST }), uboS = device.createBuffer({ size: 256, usage: BU.UNIFORM | BU.COPY_DST });
 const WT = new Float32Array(4), uboW = device.createBuffer({ size: 16, usage: BU.UNIFORM | BU.COPY_DST });
 
 const VF = SS.VERTEX | SS.FRAGMENT;
@@ -71,7 +81,7 @@ const plBlit = device.createPipelineLayout({ bindGroupLayouts: [bglBlit] });
 const mBlit = mod(W_BLIT);
 const blitPipe = (entry, format, add) => device.createRenderPipeline({ layout: plBlit, vertex: { module: mBlit, entryPoint: 'vs' },
   fragment: { module: mBlit, entryPoint: entry, targets: [{ format, blend: add ? { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } } : undefined }] } });
-const pMip8 = blitPipe('fsMip', 'rgba8unorm'), pMip16 = blitPipe('fsMip', HDR), pDown0 = blitPipe('fsDown0', HDR), pDown = blitPipe('fsDown', HDR), pUp = blitPipe('fsUp', HDR, true);
+const pMip8 = blitPipe('fsMip', 'rgba8unorm'), pMip8s = blitPipe('fsMip', 'rgba8unorm-srgb'), pMip16 = blitPipe('fsMip', HDR), pDown0 = blitPipe('fsDown0', HDR), pDown = blitPipe('fsDown', HDR), pUp = blitPipe('fsUp', HDR, true);
 const blitBG = (view) => device.createBindGroup({ layout: bglBlit, entries: [{ binding: 0, resource: view }, { binding: 1, resource: sClamp }] });
 const colorAtt = (view, clear) => ({ view, loadOp: clear ? 'clear' : 'load', storeOp: 'store', clearValue: [0, 0, 0, 0] });
 
@@ -84,7 +94,7 @@ const ibAnim = { arrayStride: 32, stepMode: 'instance', attributes: [A(2, 0, 'fl
 const ibBub = { arrayStride: 32, stepMode: 'instance', attributes: [A(0, 0, 'float32x4'), A(1, 16, 'float32x4')] };
 const ibSnow = { arrayStride: 16, stepMode: 'instance', attributes: [A(0, 0, 'float32x4')] };
 
-const scenePipe = (m, vsE, fsE, buffers, o = {}) => device.createRenderPipeline({ layout: pl0,
+const scenePipe = (m, vsE, fsE, buffers, o = {}) => device.createRenderPipeline({ layout: o.layout || pl0,
   vertex: { module: m, entryPoint: vsE, buffers, constants: o.constants },
   fragment: { module: m, entryPoint: fsE, targets: [{ format: HDR, blend: o.blend }] },
   primitive: { topology: o.strip ? 'triangle-strip' : 'triangle-list', cullMode: o.cull || 'none' },
@@ -95,7 +105,7 @@ const shadowPipe = (m, vsE, buffers, o = {}) => device.createRenderPipeline({ la
   depthStencil: { format: DEPTH, depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 1.5 } });
 
 await say('Compiling shaders…', 0.05, 300);
-const mSolid = mod(W_SOLID), mLeaf = mod(W_LEAF), mAnim = mod(W_ANIM), mSurf = mod(W_SURF), mSpr = mod(W_SPR);
+const mSolid = mod(W_SOLID), mLeaf = mod(W_LEAF), mAnim = mod(W_ANIM), mSurf = mod(W_SURF), mSpr = mod(W_SPR), mGame = mod(W_GAME), mFx = mod(W_FX);
 const pTerrain = scenePipe(mSolid, 'vs', 'fs', [vbSolid, ibSolid], { cull: 'back' });
 const pSolid = scenePipe(mSolid, 'vs', 'fs', [vbSolid, ibSolid]);
 const pLeaf = scenePipe(mLeaf, 'vs', 'fs', [ibLeaf], { strip: true, constants: { ROWS: 9 } });
@@ -109,6 +119,17 @@ const pBub = scenePipe(mSpr, 'vsBub', 'fsBub', [ibBub], { strip: true, blend: { 
 const ADD = { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } };
 const pSnow = scenePipe(mSpr, 'vsSnow', 'fsSnow', [ibSnow], { strip: true, blend: ADD });
 const pGl = scenePipe(mLeaf, 'vsGl', 'fsGl', [ibBub], { strip: true, blend: ADD, constants: { ROWS: 7 } });
+// the game: aliens, weapon and core share the solid layouts; sprites and beams are additive
+const ibFx = { arrayStride: 48, stepMode: 'instance', attributes: [A(0, 0, 'float32x4'), A(1, 16, 'float32x4'), A(2, 32, 'float32x4')] };
+// sculpted models (models.js) carry occlusion and material masks after the normal
+const vbGame = { arrayStride: 20, attributes: [A(0, 0, 'float32x3'), A(1, 12, 'snorm8x4'), A(5, 16, 'unorm8x4')] };
+const pGame = scenePipe(mGame, 'vs', 'fs', [vbGame, ibSolid], { cull: 'back' }), pGameD = scenePipe(mGame, 'vs', 'fsD', [vbGame, ibSolid], { cull: 'back' });
+// textured assets: a texture coordinate instead of the masks, and their three textures in group 1
+const vbTex = { arrayStride: 20, attributes: [A(0, 0, 'float32x3'), A(1, 12, 'snorm8x4'), A(5, 16, 'unorm16x2')] };
+const bglTex = device.createBindGroupLayout({ entries: [0, 1, 2].map((binding) => ({ binding, visibility: SS.FRAGMENT, texture: {} })) });
+const plTex = device.createPipelineLayout({ bindGroupLayouts: [bgl0, bglTex] }), mTex = mod(W_TEX);
+const pTex = scenePipe(mTex, 'vs', 'fs', [vbTex, ibSolid], { layout: plTex }), pTexD = scenePipe(mTex, 'vs', 'fsD', [vbTex, ibSolid], { layout: plTex });
+const pFxP = scenePipe(mFx, 'vsP', 'fsP', [ibFx], { strip: true, blend: ADD }), pFxB = scenePipe(mFx, 'vsB', 'fsB', [ibFx], { strip: true, blend: ADD });
 const pSolidSh = shadowPipe(mSolid, 'vs', [vbSolid, ibSolid]), pTerrSh = shadowPipe(mSolid, 'vs', [vbSolid, ibSolid], { cull: 'front' });
 const pLeafSh = shadowPipe(mLeaf, 'vs', [ibLeaf], { strip: true, constants: { ROWS: 3 } });
 
@@ -269,6 +290,8 @@ for (const p of POSES) flyPts.push([p[0], -40, p[2]]);
 await say('Growing kelp…', 0.73, 2500);
 const Wd = makeWorld(D, T, flyPts, POSES);
 for (const p of POSES) p[1] += Wd.gy(p[0], p[2]);
+// the resonance core (game.js) stands on the seabed in front of the first viewpoint
+const CORE = [4.5, 0, 2.5]; CORE[1] = Wd.gy(CORE[0], CORE[2]);
 D = Wd.gy = T.smp = null; // with gy goes the generator's working memory (about 200 MB)
 
 await say('Building set pieces…', 0.94, 1200);
@@ -326,6 +349,23 @@ Q.writeTexture({ texture: tMap }, Wd.gm, { bytesPerRow: 2048 }, [512, 512]);
 // the GPU has its own copies now: let go of the generator's (about 300 MB)
 for (const o of [Wd.big, Wd.bigF, Wd.small, ...Wd.chunks, ...Wd.props]) o.buf = o.data = 0;
 Wd.glints = Wd.volD = Wd.gm = T.vb = T.ib = T.wp = T.wn = 0;
+
+await say('Hatching aliens…', 0.97, 1500);
+// game models: 0 leaper, 1 spitter, 2 stalker, 3 caster, 4 dart rifle, 5 harpoon gun, 6 arc lance, 7 resonance core
+const GM = makeModels();
+const TX = (await fetched)?.map(([bin, ...img]) => {
+  const [nv, n] = new Uint32Array(bin, 0, 2);
+  const t = img.map((bm, i) => {
+    const mips = 32 - Math.clz32(bm.width), tx = tex(bm.width, bm.height, i ? 'rgba8unorm' : 'rgba8unorm-srgb', TU.TEXTURE_BINDING | TU.COPY_DST | TU.RENDER_ATTACHMENT, { mips });
+    Q.copyExternalImageToTexture({ source: bm }, { texture: tx }, [bm.width, bm.height]); bm.close();
+    const e = device.createCommandEncoder();
+    for (let l = 1; l < mips; l++) { const r = e.beginRenderPass({ colorAttachments: [colorAtt(tx.createView({ baseMipLevel: l, mipLevelCount: 1 }), true)] }); r.setPipeline(i ? pMip8 : pMip8s); r.setBindGroup(0, blitBG(tx.createView({ baseMipLevel: l - 1, mipLevelCount: 1 }))); r.draw(3); r.end(); }
+    Q.submit([e.finish()]);
+    return tx;
+  });
+  return { n, vb: buf(new Uint8Array(bin, 8, nv * 20), BU.VERTEX), ib: buf(new Uint8Array(bin, 8 + nv * 20, n * 4), BU.INDEX), bg: device.createBindGroup({ layout: bglTex, entries: t.map((x, i) => ({ binding: i, resource: x.createView() })) }) };
+});
+if (TX) GM.push(makeRifleHands()); // the diver's hands on the textured rifle
 
 // ---------------------------------------------------------------- render targets (rebuilt on resize)
 // The scene is drawn at `pix` pixels and scaled up to the window. frame() tunes it and the draw distance scale `det`
@@ -389,8 +429,11 @@ if (hasTS) {
 
 // ---------------------------------------------------------------- frame
 let hud = false;
-let kf = 0, kb = 0, kl = 0, kr = 0, ku = 0, kd = 0, ks = 0, mdx = 0, mdy = 0, lkx = 0, lky = 0, l2x = 0, l2y = 0, hN = 0, hMax = 0, hMin = 1e9, hPer = 1e9, hLate = 0, hTot = 0, tId = -1, tN = 0, tx0 = 0, ty0 = 0, tx = 0, ty = 0;
-const TANH = 0.6, NEAR = 0.1, EXPO = 0.62, RAYS = 0.54;
+let kf = 0, kb = 0, kl = 0, kr = 0, ku = 0, kd = 0, ks = 0, mdx = 0, mdy = 0, lkx = 0, lky = 0, l2x = 0, l2y = 0, hN = 0, hMax = 0, hMin = 1e9, hPer = 1e9, hLate = 0, hTot = 0, tId = -1, tN = 0, tx = 0, ty = 0;
+// shared with game.js: trigger held, aiming, the diver is dead, weapon in hand
+let trig = 0, ads = 0, pDead = false, wpn = 0;
+let TANH = 0.6; // half the vertical field of view; aiming narrows it
+const NEAR = 0.1, EXPO = 0.62, RAYS = 0.54;
 const submitList = [null];
 const rowOrd = new Uint8Array(CELLS);
 // Draws the cells of a cell-sorted buffer that are in view and within [minD, maxD) (scaled by `det`, but not for the
@@ -423,6 +466,7 @@ function drawCells(r, start, lo, hi, mar, indexed, verts, minD, maxD) {
   }
 }
 function render() {
+  gamePrep();
   // camera basis (right vector is horizontal)
   const cx = F[CX], cy = F[CY], cz = F[CZ], pitch = F[PIT], yaw = F[YAW];
   const cp = cos(pitch), fy = sin(pitch), rx = cos(yaw), rz = sin(yaw), fx = cp * rz, fz = -cp * rx;
@@ -456,6 +500,7 @@ function render() {
   // scene
   r = e.beginRenderPass(passScene);
   r.setBindGroup(0, bg0);
+  gameDraw(r); // first: the weapon in hand hides a good part of the scene behind it
   r.setPipeline(pTerrain); r.setVertexBuffer(0, vbTerrain); r.setVertexBuffer(1, ibSolids); r.setIndexBuffer(ibTerrain, 'uint32');
   drawCells(r, T.start, T.lo, T.hi, 1.5, 1, 0, 0, 240);
   r.setPipeline(pSolid); r.setVertexBuffer(0, vbMesh); r.setIndexBuffer(ibMesh, 'uint32');
@@ -482,6 +527,7 @@ function render() {
   r.setPipeline(pBub); r.setVertexBuffer(0, ibBubbles); r.draw(4, nBub);
   r.setPipeline(pGl); r.setVertexBuffer(0, ibGl); r.draw(4, nGl);
   r.setPipeline(pSnow); r.setVertexBuffer(0, ibSnowB); r.draw(4, nSnow);
+  gameFx(r);
   r.end();
   // light shafts
   r = e.beginRenderPass(passRays); r.setPipeline(pRays); r.setBindGroup(0, bgRays); r.draw(3); r.end();
@@ -503,12 +549,15 @@ function render() {
 // each axis for the gradient
 const CE = new Float64Array([0, 0, 0, .375, 0, 0, -.375, 0, 0, 0, .375, 0, 0, -.375, 0, 0, 0, .375, 0, 0, -.375]), CS = new Float64Array(7);
 const cv = (x, y, z) => { const b = CI[(x >> 2) + CN * ((y >> 2) + NY / 4 * (z >> 2))]; return b > 1 ? CG[b * 64 - 128 + (x & 3) + 4 * (y & 3) + 16 * (z & 3)] : b * 254 - 127; };
-function sd(j) {
-  const x = (F[CX] + CE[j * 3] - OX) / VS - CO, y = (F[CY] + CE[j * 3 + 1] - OY) / VS, z = (F[CZ] + CE[j * 3 + 2] - OZ) / VS - CO;
+// distance to the rock in metres (< 0 in water, clamped to ±1) at a world position
+function sdAt(wx, wy, wz) {
+  let x = (wx - OX) / VS - CO, y = (wy - OY) / VS, z = (wz - OZ) / VS - CO;
+  x = x < 0 ? 0 : x > CN * 4 - 1.01 ? CN * 4 - 1.01 : x; y = y < 0 ? 0 : y > NY - 1.01 ? NY - 1.01 : y; z = z < 0 ? 0 : z > CN * 4 - 1.01 ? CN * 4 - 1.01 : z;
   const ix = x | 0, iy = y | 0, iz = z | 0, u = x - ix, v = y - iy, a = cv(ix, iy, iz), b = cv(ix, iy + 1, iz), c = cv(ix, iy, iz + 1), d = cv(ix, iy + 1, iz + 1);
   const p = a + (cv(ix + 1, iy, iz) - a) * u, q = b + (cv(ix + 1, iy + 1, iz) - b) * u, r = c + (cv(ix + 1, iy, iz + 1) - c) * u, s = d + (cv(ix + 1, iy + 1, iz + 1) - d) * u;
-  const e = p + (q - p) * v; CS[j] = (e + (r + (s - r) * v - e) * (z - iz)) / 127;
+  const e = p + (q - p) * v; return (e + (r + (s - r) * v - e) * (z - iz)) / 127;
 }
+function sd(j) { CS[j] = sdAt(F[CX] + CE[j * 3], F[CY] + CE[j * 3 + 1], F[CZ] + CE[j * 3 + 2]); }
 // Moves the camera by F[MX..MZ] in steps shorter than its radius CR (so it can't pass through thin rock), pushing it
 // back out after each step and dropping velocity into the rock, so it slides along.
 const CR = 0.5;
@@ -552,18 +601,13 @@ function frame(now) {
   }
   F[TIME] += dt;
   {
-    // touch: holding the finger away from where it went down keeps turning, like a joystick
-    if (tId >= 0) {
-      const tr = 4 / (innerWidth < innerHeight ? innerWidth : innerHeight); let jx = (tx - tx0) * tr, jy = (ty - ty0) * tr;
-      jx = jx > 1 ? 1 : jx < -1 ? -1 : jx; jy = jy > 1 ? 1 : jy < -1 ? -1 : jy;
-      lkx += jx * 1.5 * dt; lky += jy * dt;
-    }
     // mouse look through two cascaded low-pass stages
-    const kq = 1 - exp(-dt * 30); lkx += mdx * 0.0022; lky += mdy * 0.0022; mdx = 0; mdy = 0;
+    const kq = 1 - exp(-dt * 30), ms = 0.0022 * TANH / 0.6; lkx += mdx * ms; lky += mdy * ms; mdx = 0; mdy = 0;
     const ax = lkx * kq, ay = lky * kq; lkx -= ax; lky -= ay; l2x += ax; l2y += ay;
     const dyw = l2x * kq, dpt = l2y * kq; l2x -= dyw; l2y -= dpt;
     const yaw = F[YAW] + dyw; let pitch = F[PIT] - dpt; pitch = pitch < -1.55 ? -1.55 : pitch > 1.55 ? 1.55 : pitch;
-    const sp = ks || tN > 1 ? 26 : 7, k = 1 - exp(-dt * 4.5), mf = tId >= 0 ? 0.7 : kf - kb, mr = kr - kl, mu = ku - kd, cp = cos(pitch), sy = sin(yaw), cw = cos(yaw);
+    // swim speed: 5 m/s, 9 with the thruster (Shift), slower while aiming; a dead diver drifts
+    const sp = pDead ? 0 : ads ? 3 : ks ? 9 : 5, k = 1 - exp(-dt * 4.5), mf = clamp(kf - kb + tmf, -1, 1), mr = clamp(kr - kl + tmr, -1, 1), mu = ku - kd, cp = cos(pitch), sy = sin(yaw), cw = cos(yaw);
     const vx = F[VX] + ((sy * cp * mf + cw * mr) * sp - F[VX]) * k, vy = F[VY] + ((sin(pitch) * mf + mu) * sp - F[VY]) * k, vz = F[VZ] + ((-cw * cp * mf + sy * mr) * sp - F[VZ]) * k;
     let x = F[CX] + vx * dt, y = F[CY] + vy * dt, z = F[CZ] + vz * dt;
     const rad = sqrt(x * x + z * z); if (rad > 150) { x *= 150 / rad; z *= 150 / rad; }
@@ -571,6 +615,7 @@ function frame(now) {
     F[YAW] = yaw; F[PIT] = pitch; F[VX] = vx; F[VY] = vy; F[VZ] = vz; F[MX] = x - F[CX]; F[MY] = y - F[CY]; F[MZ] = z - F[CZ];
     collide();
   }
+  if (!menu) gameTick(dt);
   render();
   if (hud) {
     hN++; if (dtr > hMax) hMax = dtr; if (dtr < hMin) hMin = dtr; if (dtr > hPer * 1.5) { hLate++; hTot++; }
@@ -580,36 +625,55 @@ function frame(now) {
 }
 
 // ---------------------------------------------------------------- input
+// e.code names the physical key; on-screen and injected keyboards leave it empty, so fall back to the character
+const codeOf = (e) => e.code || (e.key.length > 1 ? (e.key === 'Shift' ? 'ShiftLeft' : e.key) : e.key === ' ' ? 'Space' : (e.key >= '0' && e.key <= '9' ? 'Digit' : 'Key') + e.key.toUpperCase());
 const key = (e, v) => {
-  switch (e.code) {
+  const code = codeOf(e);
+  switch (code) {
     case 'KeyW': kf = v; break; case 'KeyS': kb = v; break; case 'KeyA': kl = v; break; case 'KeyD': kr = v; break;
-    case 'KeyE': ku = v; break; case 'KeyQ': kd = v; break; case 'ShiftLeft': case 'ShiftRight': ks = v; break;
+    case 'KeyE': case 'Space': ku = v; break; case 'KeyQ': case 'KeyC': kd = v; break;
+    case 'ShiftLeft': case 'ShiftRight': ks = v; break;
     default: if (v && !e.repeat) {
-      if (e.code === 'KeyH') { hud = !hud; hTot = 0; hPer = 1e9; info.textContent = ''; }
-      else if (e.code === 'KeyM') mute();
-      else if (e.code === 'Escape') ui(true);
-      else if (e.code >= 'Digit1' && e.code <= 'Digit6') lookAt(...POSES[e.code.charCodeAt(5) - 49]);
+      if (code === 'KeyH') { hud = !hud; hTot = 0; hPer = 1e9; info.textContent = ''; }
+      else if (code === 'KeyM') mute();
+      else if (code === 'Escape') ui(true);
+      else if (code === 'KeyR') reload();
+      else if (code === 'Enter') redeploy();
+      else if (code >= 'Digit1' && code <= 'Digit3') pick(code.charCodeAt(5) - 49);
     }
   }
 };
 // behind the menu only the stats and mute keys work
-addEventListener('keydown', (e) => { if (menu && e.code !== 'KeyH' && e.code !== 'KeyM') return; sound(); key(e, 1); });
+addEventListener('keydown', (e) => { const c = codeOf(e); if (menu && c !== 'KeyH' && c !== 'KeyM') return; sound(); if (c === 'Space') e.preventDefault(); key(e, 1); });
 addEventListener('keyup', (e) => key(e, 0));
-const release = () => { kf = kb = kl = kr = ku = kd = ks = 0; tId = -1; tN = 0; };
+const release = () => { kf = kb = kl = kr = ku = kd = ks = trig = ads = tmf = tmr = 0; tId = vId = -1; tN = 0; };
 const capture = () => { sound(); const p = canvas.requestPointerLock({ unadjustedMovement: true }); if (p && p.catch) p.catch(() => canvas.requestPointerLock()).catch(() => 0); };
 canvas.addEventListener('click', capture);
-addEventListener('mousemove', (e) => { if (document.pointerLockElement === canvas) { mdx += e.movementX; mdy += e.movementY; } });
+const locked = () => document.pointerLockElement === canvas;
+addEventListener('mousemove', (e) => { if (locked()) { mdx += e.movementX; mdy += e.movementY; } });
+// left button fires (and redeploys after the mission ends), right button aims, the wheel changes weapon
+addEventListener('mousedown', (e) => { if (!locked()) return; if (e.button === 0) { trig = 1; redeploy(); } else if (e.button === 2) ads = 1; });
+addEventListener('mouseup', (e) => { if (e.button === 0) trig = 0; else if (e.button === 2) ads = 0; });
+addEventListener('wheel', (e) => { if (locked()) pick((wpn + (e.deltaY > 0 ? 1 : 2)) % 3); }, { passive: true });
+addEventListener('contextmenu', (e) => e.preventDefault());
 addEventListener('blur', release);
+// touch: the left half of the screen is a movement stick, the right half looks around; the weapon fires by itself
+// when an alien is in the sights (see gameTick)
+let vId = -1, vx0 = 0, vy0 = 0, tmf = 0, tmr = 0;
 const touch = (e) => {
-  e.preventDefault(); sound(); tN = e.touches.length;
-  let f = null, first = false; for (let i = 0; i < tN; i++) if (e.touches[i].identifier === tId) f = e.touches[i];
-  if (!f) { tId = -1; if (tN) { f = e.touches[0]; tId = f.identifier; first = true; } }
-  if (f) {
+  e.preventDefault(); sound(); tN = e.touches.length; redeploy();
+  const R = rot.matches, s = 1100 / min(innerWidth, innerHeight), half = (R ? innerHeight : innerWidth) / 2;
+  let look = false, move = false;
+  for (let i = 0; i < tN; i++) {
     // the touch axes turn with the page when it lies on its side
-    const x = rot.matches ? f.clientY : f.clientX, y = rot.matches ? -f.clientX : f.clientY, s = 1100 / min(innerWidth, innerHeight);
-    if (first) { tx0 = x; ty0 = y; } else { mdx += (x - tx) * s; mdy += (y - ty) * s; } // the view follows the finger at once
-    tx = x; ty = y;
+    const f = e.touches[i], x = R ? f.clientY : f.clientX, y = R ? -f.clientX : f.clientY;
+    if (f.identifier === vId) { move = true; tmr = clamp((x - vx0) * s / 180, -1, 1); tmf = clamp((vy0 - y) * s / 180, -1, 1); }
+    else if (f.identifier === tId) { look = true; mdx += (x - tx) * s; mdy += (y - ty) * s; tx = x; ty = y; }
+    else if (x < half && vId < 0) { move = true; vId = f.identifier; vx0 = x; vy0 = y; }
+    else if (tId < 0) { look = true; tId = f.identifier; tx = x; ty = y; }
   }
+  if (!look) tId = -1;
+  if (!move) { vId = -1; tmf = tmr = 0; }
 };
 for (const n of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) canvas.addEventListener(n, touch, { passive: false });
 
@@ -624,9 +688,9 @@ const ui = (m) => {
   if (m) { release(); setTimeout(() => menu && bDive.focus(), 100); } else document.activeElement.blur();
 };
 const go = () => {
-  sound(); ui(false); bDive.textContent = 'Resume';
+  sound(); ui(false); bDive.textContent = 'Resume'; gameStart();
   // phones: go fullscreen and ask for landscape; where that is refused the CSS rotation still applies
-  if (mob) document.documentElement.requestFullscreen?.()?.then(() => screen.orientation.lock('landscape')).catch(() => 0);
+  if (mob) document.documentElement.requestFullscreen?.()?.then(() => max(screen.width, screen.height) > min(screen.width, screen.height) * 1.25 && screen.orientation.lock('landscape')).catch(() => 0);
   if (!mob) capture();
 };
 bDive.onclick = go; $('o').onclick = () => ui(true);
@@ -634,10 +698,3 @@ bDive.onclick = go; $('o').onclick = () => ui(true);
 $('q').querySelectorAll('button').forEach((b, i) => { if (i === 2 - LV) b.className = 'on'; else b.onclick = () => { keep('abyssal', 2 - i); location.reload(); }; });
 document.addEventListener('pointerlockchange', () => ui(!document.pointerLockElement));
 
-// draw the first frame and wait for the GPU to finish it (pipelines get compiled on first use) before the reveal
-lookAt(...POSES[0]);
-await say('Letting the light in…', 1, 400);
-render(); await Q.onSubmittedWorkDone();
-setTimeout(keep, 15e3, 'abyssalLoad', ''); // the load counts as survived after 15 s of frames
-ui(true);
-requestAnimationFrame((t) => { F[LAST] = t; requestAnimationFrame(frame); });

@@ -6,9 +6,12 @@
   "scripts": {
     "build": "node build.mjs",
     "build:readable": "node build.mjs --readable",
-    "build:dev": "node build.mjs --dev"
+    "build:dev": "node build.mjs --dev",
+    "assets": "node assets.mjs"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "draco3d": "^1.5.9",
+    "esbuild": "^0.28.2",
+    "meshoptimizer": "^1.3.0"
   }
 }
